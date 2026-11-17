@@ -1,0 +1,13 @@
+{
+  "name": "aimark-development",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check web/app.js",
+    "test:pi": "node --test tests/pi.test.mjs",
+    "test:browser": "node tests/browser.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.56.0"
+  }
+}
