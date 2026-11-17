@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>aimark · code provenance</title>
+		<link rel="stylesheet" href="/style.css">
+		<script src="/app.js" defer></script>
+	</head>
+	<body>
+		<header>
+			<a class="brand" href="/" aria-label="aimark home"
+				><span class="brand-mark">ai</span>aimark<span class="tag"
+					>LOCAL LEDGER</span
+				></a
+			>
+			<div class="header-right">
+				<span class="local-dot"></span><span>On your machine</span
+				><button id="refresh" title="Refresh attribution">
+					↻ <span>Refresh</span>
+				</button>
+			</div>
+		</header>
+		<main>
+			<section class="intro">
+				<div>
+					<p class="eyebrow">CODE PROVENANCE</p>
+					<h1>Know who wrote what.</h1>
+					<p class="subtitle">Your code, with a little more context.</p>
+				</div>
+				<div class="legend">
+					<span><i class="human-dot"></i> Human</span
+					><span><i class="ai-dot"></i> AI</span
+					><span><i class="pending-dot"></i> Pending</span>
+				</div>
+			</section>
+			<section class="metrics" aria-label="Project summary">
+				<article class="metric overview">
+					<span class="metric-label">AI contribution</span>
+					<div>
+						<strong id="pct">—</strong
+						><span class="metric-unit">of current lines</span>
+					</div>
+					<progress
+						id="contribution"
+						value="0"
+						max="100"
+						aria-label="AI percentage"
+					></progress>
+				</article>
+				<article class="metric">
+					<span class="metric-label"><i class="human-dot"></i> Human lines</span
+					><strong id="human">—</strong
+					><small>Including unrecorded changes</small>
+				</article>
+				<article class="metric">
+					<span class="metric-label"><i class="ai-dot"></i> AI lines</span
+					><strong id="ai">—</strong><small>Attributed to a harness</small>
+				</article>
+				<article class="metric">
+					<span class="metric-label">Text files</span
+					><strong id="files-count">—</strong
+					><small id="scope">In this project</small>
+				</article>
+			</section>
+			<div id="status" role="status" aria-live="polite">
+				Loading your ledger…
+			</div>
+			<section class="workspace" aria-label="Source attribution">
+				<aside>
+					<div class="sidebar-head">
+						<h2>Project files <span id="shown-count"></span></h2>
+						<label class="search"
+							><span aria-hidden="true">⌕</span>
+							<input
+								id="file-search"
+								type="search"
+								placeholder="Find a file…"
+								aria-label="Filter project files"
+							><kbd>/</kbd></label
+						>
+						<div class="file-controls">
+							<select id="file-filter" aria-label="Filter files by author">
+								<option value="all">All files</option>
+								<option value="ai">Contains AI</option>
+								<option value="human">Human only</option>
+								<option value="pending">Pending changes</option>
+							</select><select id="sort" aria-label="Sort files">
+								<option value="ai">AI % ↓</option>
+								<option value="name">Name A–Z</option>
+								<option value="size">Lines ↓</option>
+							</select>
+						</div>
+					</div>
+					<nav id="file-list" aria-label="Project files"></nav>
+				</aside>
+				<div class="source-panel">
+					<div class="source-header">
+						<div class="file-title">
+							<span class="file-icon" aria-hidden="true">⌘</span>
+							<h2 id="file-title">Choose a file</h2>
+						</div>
+						<span id="file-summary"></span>
+					</div>
+					<div class="source-toolbar">
+						<div class="tabs" role="group" aria-label="Filter source lines">
+							<button data-lines="all" aria-pressed="true">All lines</button
+							><button data-lines="human" aria-pressed="false">Human</button
+							><button data-lines="ai" aria-pressed="false">AI</button
+							><button data-lines="pending" aria-pressed="false">
+								Pending
+							</button>
+						</div>
+						<input
+							type="search"
+							id="line-search"
+							placeholder="Search in file…"
+							aria-label="Search source lines"
+						>
+					</div>
+					<div class="code-legend">
+						<span>LINE</span><span>ATTRIBUTION</span><span>SOURCE</span>
+					</div>
+					<div
+						id="source"
+						tabindex="0"
+						aria-label="Source code and line attribution"
+					>
+						<div class="empty">
+							<span class="empty-glyph">{ }</span>
+							<h3>A clearer view of your code.</h3>
+							<p>Select a file to inspect its line-by-line authorship.</p>
+						</div>
+					</div>
+					<div class="source-footer">
+						<span id="line-count">No file selected</span
+						><span><i class="ai-dot"></i> AI lines are tinted green</span>
+					</div>
+				</div>
+			</section>
+			<footer>
+				<span>Source stays untouched. Provenance stays local.</span
+				><span>Pending means unrecorded, not verified human authorship.</span>
+			</footer>
+		</main>
+	</body>
+</html>

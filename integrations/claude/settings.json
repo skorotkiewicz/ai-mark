@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [
+        { "type": "command", "command": "aimark --root \"$CLAUDE_PROJECT_DIR\" hook claude" }
+      ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [
+        { "type": "command", "command": "aimark --root \"$CLAUDE_PROJECT_DIR\" hook claude" }
+      ] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [
+        { "type": "command", "command": "aimark --root \"$CLAUDE_PROJECT_DIR\" hook claude" }
+      ] }
+    ]
+  }
+}
