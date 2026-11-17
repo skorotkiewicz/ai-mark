@@ -265,9 +265,11 @@ h2 {
 	height: 34px;
 	gap: 7px;
 }
-.search > span {
+.search-icon {
 	color: #8e9cb0;
-	font-size: 20px;
+	width: 14px;
+	height: 14px;
+	flex-shrink: 0;
 }
 .search input {
 	min-width: 0;
