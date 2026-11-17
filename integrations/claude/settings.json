@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       { "matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [
-        { "type": "command", "command": "aimark --root \"$CLAUDE_PROJECT_DIR\" hook claude" }
+        { "type": "command", "command": "aimark --root \"$CLAUDE_PROJECT_DIR\" hook claude", "timeout": 30, "onFailure": "block" }
       ] }
     ],
     "PostToolUse": [

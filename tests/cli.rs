@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Write,
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
 };
 use tempfile::TempDir;
 
@@ -45,7 +45,7 @@ fn blame(root: &Path, file: &str) -> Value {
 fn write(root: &Path, file: &str, text: &str) {
     fs::write(root.join(file), text).unwrap();
 }
-fn hook(root: &Path, event: &str, file: Option<&Path>) -> Output {
+fn spawn_hook(root: &Path, event: &str, file: Option<&Path>) -> Child {
     let mut p = Command::new(env!("CARGO_BIN_EXE_aimark"))
         .current_dir(root)
         .arg("--root")
@@ -62,7 +62,11 @@ fn hook(root: &Path, event: &str, file: Option<&Path>) -> Output {
         .unwrap()
         .write_all(payload.to_string().as_bytes())
         .unwrap();
-    p.wait_with_output().unwrap()
+    p
+}
+
+fn hook(root: &Path, event: &str, file: Option<&Path>) -> Output {
+    spawn_hook(root, event, file).wait_with_output().unwrap()
 }
 
 fn ok_hook(root: &Path, event: &str, file: &Path) {
@@ -622,6 +626,7 @@ fn preserves_non_utf8_real_git_exclude_rules() {
     let d = TempDir::new().unwrap();
     let r = d.path();
     git(r, &["init", "-q"]);
+    fs::create_dir_all(r.join(".git/info")).unwrap();
     let original = b"# comment: \xff\nlocal-private.txt\n";
     fs::write(r.join(".git/info/exclude"), original).unwrap();
     ok(r, &["init"]);
@@ -652,4 +657,91 @@ fn mixed_case_git_environment_cannot_redirect_windows_index() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!other.path().join("index").exists());
+}
+
+#[test]
+fn hook_lock_timeout_blocks_without_changing_history() {
+    use std::time::{Duration, Instant};
+    let d = TempDir::new().unwrap();
+    let root = d.path();
+    write(root, "a.txt", "human\n");
+    ok(root, &["checkpoint"]);
+    let before = git(root, &["--git-dir=.aimark/repo", "rev-parse", "HEAD"]);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join(".aimark/lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let start = Instant::now();
+    let mut child = spawn_hook(root, "PreToolUse", Some(&root.join("a.txt")));
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(8) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("hook waited indefinitely for the ledger lock instead of blocking the edit");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("timed out waiting for ledger lock"));
+    drop(lock);
+    assert_eq!(
+        git(root, &["--git-dir=.aimark/repo", "rev-parse", "HEAD"]),
+        before
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stats_batches_file_queries_instead_of_repeating_them_for_every_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = TempDir::new().unwrap();
+    let helpers = TempDir::new().unwrap();
+    let root = project.path();
+    for i in 0..8 {
+        write(root, &format!("file-{i}.txt"), "human\n");
+    }
+    ok(root, &["checkpoint"]);
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real_git = String::from_utf8(real_git.stdout).unwrap();
+    let wrapper = helpers.path().join("git");
+    fs::write(&wrapper, "#!/bin/sh\nprintf 'call\\n' >> \"$AIMARK_TEST_GIT_LOG\"\nexec \"$AIMARK_TEST_REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let log = helpers.path().join("calls");
+    let output = Command::new(env!("CARGO_BIN_EXE_aimark"))
+        .arg("--root")
+        .arg(root)
+        .args(["stat", "--json"])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                helpers.path().display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .env("AIMARK_TEST_REAL_GIT", real_git.trim())
+        .env("AIMARK_TEST_GIT_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stats: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stats["total"], 8);
+    let calls = fs::read_to_string(log).unwrap().lines().count();
+    assert!(
+        calls <= 11,
+        "eight tracked text files spawned {calls} Git processes, expected at most one blame per file plus three batched reads"
+    );
 }

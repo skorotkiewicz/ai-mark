@@ -72,11 +72,11 @@ The root is the nearest ancestor containing `.aimark/` or `.git`, falling back t
 
 ### Claude Code
 
-Install aimark on `PATH`, then merge [integrations/claude/settings.json](integrations/claude/settings.json) into your project's `.claude/settings.json`. Preserve any hooks already configured there. The supplied commands use the POSIX shell syntax supported by Claude Code on macOS, Linux, and Git Bash.
+Install aimark on `PATH`, then merge [integrations/claude/settings.json](integrations/claude/settings.json) into your project's `.claude/settings.json`. Preserve any hooks already configured there. The configuration requires Claude Code 2.1.295 or newer for `onFailure: "block"`. The supplied commands use the POSIX shell syntax supported by Claude Code on macOS, Linux, and Git Bash.
 
 The same `aimark hook claude` command handles before, after, and failed file-tool events. It reads the target path and session from the payload and the latest model from the transcript when available. Missing model information becomes `unknown`. A malformed payload fails instead of recording the entire project.
 
-Hook errors return exit code 2, so Claude blocks a file edit when its before-edit checkpoint fails.
+Hook errors return exit code 2, so Claude blocks a file edit when its before-edit checkpoint fails. The supplied before-edit hook also sets `onFailure: "block"` and a 30-second timeout, so launch failures and external timeouts block the edit too. Aimark waits up to five seconds to acquire a ledger lock before returning an error.
 
 These hooks cover `Edit`, `Write`, `MultiEdit`, and `NotebookEdit`. Shell commands and custom tools that write files need wrapper coverage instead:
 
@@ -115,12 +115,15 @@ The wrapper works with any local command. You can also call `checkpoint --files 
 - Unchanged lines keep their previous attribution. Whitespace-only changes are ignored by blame. Git also detects some moves and renames.
 - Unrecorded lines count as human and have `pending: true`. This means their origin has not been recorded. It is not a claim that a human wrote them.
 - Reports never commit pending changes. Looking at the dashboard during an edit cannot turn that edit into a human checkpoint.
+- Reports capture one ledger revision and release their capture lock before blaming lines. Slow reports do not hold up edit hooks. Working files remain live, so different files can reflect different moments during an active edit.
 - Snapshots honor worktree `.gitignore` files. Files already in the ledger stay tracked until removed, following Git's usual behavior. The real repository's local excludes and global ignore settings are separate from the ledger.
 - Reports inspect UTF-8 text files up to 1,000,000 bytes. Binary files, symlinks, and larger files are skipped and counted. Empty text files appear with zero lines. Snapshots can still contain binary or large files.
 - Ledger operations use an OS file lock. Scoped hooks can track overlapping edits to different files. Concurrent edits to the same file, simultaneous wrappers, and human edits during a wrapper run cannot be separated reliably.
 - Nested Git repositories and submodules are separate tracking boundaries. Initialize and inspect them independently with `--root`; the parent's report does not include their source lines.
 
 The ledger has its own history and index. aimark adds `/.aimark/` to the real repository's local exclude file when one exists, including linked worktrees. Source files, the real Git index, and tracked ignore files stay untouched. Keep files you do not want snapshotted in `.gitignore` before the first checkpoint.
+
+Reports use temporary read views inside `.aimark/` that share the ledger's Git objects but have their own detached HEAD and no shared index. The views are removed when each report finishes. The dashboard uses four request workers, so one slow report does not stall asset requests.
 
 This is cooperative provenance. It cannot detect AI code pasted from a chat, reconstruct authorship before tracking started, or prevent someone from deleting or rewriting the ledger. Structural formatter rewrites may change attribution. The dashboard is read-only and has no account system; other users and processes on the same machine may reach its loopback port while it is running.
 

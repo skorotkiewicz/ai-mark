@@ -98,60 +98,188 @@ fn append_excludes(path: &Path, rules: &[&[u8]]) -> Result<()> {
     Ok(())
 }
 
+pub fn repository_git(root: &Path, git_dir: &Path) -> Command {
+    let mut cmd = clean_git();
+    // Keep filesystem paths canonical in Rust, but avoid Windows verbatim paths in Git arguments.
+    // Git paths below are relative to the explicit project working directory.
+    cmd.current_dir(root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .arg("--literal-pathspecs")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .arg("--work-tree")
+        .arg(".")
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.quotepath=false",
+            "-c",
+            "core.autocrlf=false",
+        ])
+        .args(["-c", "core.hooksPath=.aimark/no-hooks"])
+        .env("GIT_AUTHOR_NAME", "human")
+        .env("GIT_AUTHOR_EMAIL", "human@aimark.local")
+        .env("GIT_COMMITTER_NAME", "aimark")
+        .env("GIT_COMMITTER_EMAIL", "ledger@aimark.local");
+    cmd
+}
+
+pub fn project_path(root: &Path, input: &Path, base: &Path) -> Result<String> {
+    let absolute = if input.is_absolute() {
+        input.to_owned()
+    } else {
+        base.join(input)
+    };
+    let mut normalized = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::ParentDir => {
+                ensure!(normalized.pop(), "path escapes project");
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let relative = match normalized.strip_prefix(root) {
+        Ok(relative) => relative.to_owned(),
+        Err(_) => {
+            // macOS temporary paths can reach the same root through an aliased ancestor.
+            // Choose the outermost root alias so in-project symlinks remain in the suffix
+            // and are rejected below. The suffix may name a new or deleted file.
+            let root_alias = normalized
+                .ancestors()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .find(|ancestor| ancestor.canonicalize().is_ok_and(|path| path == root))
+                .context("path is outside the project")?;
+            normalized.strip_prefix(root_alias)?.to_owned()
+        }
+    };
+    ensure!(
+        !relative.as_os_str().is_empty(),
+        "select a file or subdirectory, not the project root"
+    );
+    let mut current = root.to_owned();
+    for part in relative.components() {
+        ensure!(
+            part.as_os_str() != ".git" && part.as_os_str() != ".aimark",
+            "internal metadata paths cannot be selected"
+        );
+        current.push(part.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(m) => ensure!(
+                !m.file_type().is_symlink(),
+                "symlink paths cannot be selected"
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let name = relative
+        .to_str()
+        .context("filenames must be UTF-8")?
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    ensure!(
+        !name.starts_with(':'),
+        "Git pathspec syntax is not accepted"
+    );
+    Ok(name)
+}
+
+pub fn repository_files(root: &Path, git_dir: &Path, paths: &[String]) -> Result<Vec<String>> {
+    let result = output(
+        repository_git(root, git_dir)
+            .args([
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+            ])
+            .args(paths),
+    )?;
+    let mut files = result
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8(p.to_vec()).context("filenames must be UTF-8"))
+        .collect::<Result<Vec<_>>>()?;
+    files.sort();
+    files.dedup();
+    files.retain(|f| {
+        !Path::new(f)
+            .components()
+            .any(|p| p.as_os_str() == OsStr::new(".git") || p.as_os_str() == OsStr::new(".aimark"))
+    });
+    Ok(files)
+}
+
+pub fn open_lock(root: &Path) -> Result<File> {
+    ensure!(root.is_dir(), "project root must be a directory");
+    let dir = root.join(".aimark");
+    ordinary_directory(&dir)?;
+    let lock_path = dir.join("lock");
+    if let Ok(m) = fs::symlink_metadata(&lock_path) {
+        ensure!(
+            m.is_file() && !m.file_type().is_symlink(),
+            "invalid ledger lock file"
+        );
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    Ok(lock)
+}
+
+/// Keep lock acquisition shorter than the configured harness hook timeout.
+pub fn acquire_lock(lock: &File, shared: bool) -> Result<()> {
+    use std::{
+        fs::TryLockError,
+        time::{Duration, Instant},
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = if shared {
+            lock.try_lock_shared()
+        } else {
+            lock.try_lock()
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(TryLockError::WouldBlock) => {
+                bail!("timed out waiting for ledger lock after 5 seconds")
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(error).context("could not lock the provenance ledger");
+            }
+        }
+    }
+}
+
 impl Ledger {
     pub fn open(root: PathBuf) -> Result<Self> {
-        ensure!(root.is_dir(), "project root must be a directory");
-        let dir = root.join(".aimark");
-        ordinary_directory(&dir)?;
-        let lock_path = dir.join("lock");
-        if let Ok(m) = fs::symlink_metadata(&lock_path) {
-            ensure!(
-                m.is_file() && !m.file_type().is_symlink(),
-                "invalid ledger lock file"
-            );
-        }
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)?;
-        lock.lock()
-            .context("could not lock the provenance ledger")?;
+        let lock = open_lock(&root)?;
+        acquire_lock(&lock, false)?;
         let ledger = Self { root, _lock: lock };
         ledger.initialize()?;
         Ok(ledger)
     }
 
     pub fn git(&self) -> Command {
-        let mut cmd = clean_git();
-        // Keep filesystem paths canonical in Rust, but avoid Windows verbatim paths in Git arguments.
-        // Git paths below are relative to the explicit project working directory.
-        cmd.current_dir(&self.root)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            )
-            .arg("--literal-pathspecs")
-            .arg("--git-dir")
-            .arg(".aimark/repo")
-            .arg("--work-tree")
-            .arg(".")
-            .args([
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.quotepath=false",
-                "-c",
-                "core.autocrlf=false",
-            ])
-            .args(["-c", "core.hooksPath=.aimark/no-hooks"])
-            .env("GIT_AUTHOR_NAME", "human")
-            .env("GIT_AUTHOR_EMAIL", "human@aimark.local")
-            .env("GIT_COMMITTER_NAME", "aimark")
-            .env("GIT_COMMITTER_EMAIL", "ledger@aimark.local");
-        cmd
+        repository_git(&self.root, Path::new(".aimark/repo"))
     }
 
     fn initialize(&self) -> Result<()> {
@@ -220,95 +348,11 @@ impl Ledger {
 
     /// Resolve project-root aliases while rejecting symlinks inside the project and Git magic.
     pub fn path(&self, input: &Path, base: &Path) -> Result<String> {
-        let absolute = if input.is_absolute() {
-            input.to_owned()
-        } else {
-            base.join(input)
-        };
-        let mut normalized = PathBuf::new();
-        for part in absolute.components() {
-            match part {
-                Component::ParentDir => {
-                    ensure!(normalized.pop(), "path escapes project");
-                }
-                Component::CurDir => {}
-                other => normalized.push(other.as_os_str()),
-            }
-        }
-        let relative = match normalized.strip_prefix(&self.root) {
-            Ok(relative) => relative.to_owned(),
-            Err(_) => {
-                // macOS temporary paths can reach the same root through an aliased ancestor.
-                // Choose the outermost root alias so in-project symlinks remain in the suffix
-                // and are rejected below. The suffix may name a new or deleted file.
-                let root_alias = normalized
-                    .ancestors()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .find(|ancestor| ancestor.canonicalize().is_ok_and(|path| path == self.root))
-                    .context("path is outside the project")?;
-                normalized.strip_prefix(root_alias)?.to_owned()
-            }
-        };
-        ensure!(
-            !relative.as_os_str().is_empty(),
-            "select a file or subdirectory, not the project root"
-        );
-        let mut current = self.root.clone();
-        for part in relative.components() {
-            ensure!(
-                part.as_os_str() != ".git" && part.as_os_str() != ".aimark",
-                "internal metadata paths cannot be selected"
-            );
-            current.push(part.as_os_str());
-            match fs::symlink_metadata(&current) {
-                Ok(m) => ensure!(
-                    !m.file_type().is_symlink(),
-                    "symlink paths cannot be selected"
-                ),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-        let name = relative
-            .to_str()
-            .context("filenames must be UTF-8")?
-            .replace(std::path::MAIN_SEPARATOR, "/");
-        ensure!(
-            !name.starts_with(':'),
-            "Git pathspec syntax is not accepted"
-        );
-        Ok(name)
+        project_path(&self.root, input, base)
     }
 
     pub fn files(&self, paths: &[String]) -> Result<Vec<String>> {
-        let result = output(
-            self.git()
-                .args([
-                    "ls-files",
-                    "--cached",
-                    "--others",
-                    "--exclude-standard",
-                    "-z",
-                    "--",
-                ])
-                .args(paths),
-        )?;
-        let mut files = result
-            .stdout
-            .split(|b| *b == 0)
-            .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8(p.to_vec()).context("filenames must be UTF-8"))
-            .collect::<Result<Vec<_>>>()?;
-        files.sort();
-        files.dedup();
-        files.retain(|f| {
-            !Path::new(f).components().any(|p| {
-                p.as_os_str() == OsStr::new(".git") || p.as_os_str() == OsStr::new(".aimark")
-            })
-        });
-        Ok(files)
+        repository_files(&self.root, Path::new(".aimark/repo"), paths)
     }
 
     pub fn checkpoint(&self, paths: &[String]) -> Result<bool> {

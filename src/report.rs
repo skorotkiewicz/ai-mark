@@ -1,4 +1,4 @@
-use crate::ledger::{AI_MAIL, Ledger, output};
+use crate::{ledger::AI_MAIL, snapshot::ReadSnapshot};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{fs, io::Write, path::Path, process::Stdio};
@@ -36,7 +36,7 @@ pub struct Stats {
     pub skipped: usize,
 }
 
-fn text(ledger: &Ledger, file: &str) -> Result<String> {
+fn text(ledger: &ReadSnapshot, file: &str) -> Result<String> {
     ledger.path(Path::new(file), &ledger.root)?;
     let path = ledger.root.join(file);
     let meta = fs::symlink_metadata(&path).context("file does not exist")?;
@@ -52,14 +52,14 @@ fn text(ledger: &Ledger, file: &str) -> Result<String> {
     String::from_utf8(bytes).context("file is not UTF-8 text")
 }
 
-pub fn blame(ledger: &Ledger, file: &str) -> Result<Vec<Line>> {
-    ensure!(
-        ledger.files(&[file.to_owned()])?.iter().any(|f| f == file),
-        "file is ignored or unavailable"
-    );
+pub fn blame(ledger: &ReadSnapshot, file: &str) -> Result<Vec<Line>> {
+    ensure!(ledger.is_eligible(file), "file is ignored or unavailable");
+    blame_inner(ledger, file)
+}
+
+fn blame_inner(ledger: &ReadSnapshot, file: &str) -> Result<Vec<Line>> {
     let contents = text(ledger, file)?;
-    let tree = output(ledger.git().args(["ls-tree", "-z", "HEAD", "--", file]))?;
-    if tree.stdout.is_empty() {
+    if !ledger.is_tracked(file) {
         return Ok(contents
             .lines()
             .enumerate()
@@ -137,7 +137,7 @@ fn parse_blame(porcelain: &str) -> Result<Vec<Line>> {
     Ok(rows)
 }
 
-pub fn stats(ledger: &Ledger) -> Result<Stats> {
+pub fn stats(ledger: &ReadSnapshot) -> Result<Stats> {
     let mut result = Stats {
         files: Vec::new(),
         ai: 0,
@@ -147,13 +147,13 @@ pub fn stats(ledger: &Ledger) -> Result<Stats> {
         pct: 0.0,
         skipped: 0,
     };
-    for file in ledger.files(&[])? {
-        if !ledger.root.join(&file).exists() {
+    for file in ledger.files() {
+        if !ledger.root.join(file).exists() {
             continue;
         }
-        let rows = match blame(ledger, &file) {
+        let rows = match blame_inner(ledger, file) {
             Ok(rows) => rows,
-            Err(_) if text(ledger, &file).is_err() => {
+            Err(_) if text(ledger, file).is_err() => {
                 result.skipped += 1;
                 continue;
             }
@@ -166,7 +166,7 @@ pub fn stats(ledger: &Ledger) -> Result<Stats> {
         result.total += total;
         result.pending += pending;
         result.files.push(FileStat {
-            file,
+            file: file.clone(),
             ai,
             human: total - ai,
             pending,
@@ -187,5 +187,72 @@ fn percentage(part: usize, total: usize) -> f64 {
         0.0
     } else {
         100.0 * part as f64 / total as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ledger::{Ledger, clean_git, output};
+    use tempfile::TempDir;
+
+    #[test]
+    fn read_snapshot_releases_ledger_lock_and_keeps_its_captured_head() {
+        let project = TempDir::new().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        fs::write(root.join("a.txt"), "human\n").unwrap();
+        {
+            Ledger::open(root.clone()).unwrap().checkpoint(&[]).unwrap();
+        }
+        let index = fs::read(root.join(".aimark/repo/index")).unwrap();
+        let snapshot = ReadSnapshot::open(root.clone()).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join(".aimark/lock"))
+            .unwrap();
+        lock.try_lock()
+            .expect("a report must release its capture lock before blaming files");
+        drop(lock);
+        assert!(!blame(&snapshot, "a.txt").unwrap()[0].pending);
+        assert_eq!(fs::read(root.join(".aimark/repo/index")).unwrap(), index);
+
+        fs::write(root.join("a.txt"), "robot\n").unwrap();
+        {
+            Ledger::open(root.clone())
+                .unwrap()
+                .record("test", "model", None, &[])
+                .unwrap();
+        }
+        let lines = blame(&snapshot, "a.txt").unwrap();
+        assert!(!lines[0].ai);
+        assert!(
+            lines[0].pending,
+            "a later ledger commit must not change an existing report's base"
+        );
+        let fresh = ReadSnapshot::open(root).unwrap();
+        assert!(blame(&fresh, "a.txt").unwrap()[0].ai);
+    }
+
+    #[test]
+    fn read_snapshot_recovers_an_unborn_ledger_without_checkpointing_source() {
+        let project = TempDir::new().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        fs::write(root.join("a.txt"), "unrecorded human\n").unwrap();
+        fs::create_dir(root.join(".aimark")).unwrap();
+        output(clean_git().current_dir(&root).args([
+            "-c",
+            "init.templateDir=",
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            ".aimark/repo",
+        ]))
+        .unwrap();
+        let snapshot = ReadSnapshot::open(root).unwrap();
+        let lines = blame(&snapshot, "a.txt").unwrap();
+        assert!(lines[0].pending);
+        assert!(!lines[0].ai);
     }
 }

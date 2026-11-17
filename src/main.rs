@@ -3,6 +3,7 @@ mod hooks;
 mod ledger;
 mod report;
 mod runner;
+mod snapshot;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
@@ -132,6 +133,11 @@ fn execute(cli: Cli) -> Result<std::process::ExitCode> {
         dashboard::serve(root, port)?;
         return Ok(std::process::ExitCode::SUCCESS);
     }
+    if matches!(&cli.command, Action::Blame { .. } | Action::Stat { .. }) {
+        let snapshot = snapshot::ReadSnapshot::open(root.clone())?;
+        report_action(&snapshot, cli.command, base)?;
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
     let hook = match &cli.command {
         Action::Hook { .. } | Action::Record { stdin: Some(_), .. } => Some(hooks::read_claude()?),
         _ => None,
@@ -189,9 +195,19 @@ fn execute(cli: Cli) -> Result<std::process::ExitCode> {
                 _ => anyhow::bail!("unsupported hook event: {}", hook.event),
             }
         }
+        Action::Dashboard { .. }
+        | Action::Run { .. }
+        | Action::Blame { .. }
+        | Action::Stat { .. } => unreachable!(),
+    }
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn report_action(ledger: &snapshot::ReadSnapshot, action: Action, base: &Path) -> Result<()> {
+    match action {
         Action::Blame { file, json } => {
             let file = ledger.path(&file, base)?;
-            let lines = report::blame(&ledger, &file)?;
+            let lines = report::blame(ledger, &file)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&lines)?);
             } else {
@@ -212,7 +228,7 @@ fn execute(cli: Cli) -> Result<std::process::ExitCode> {
             }
         }
         Action::Stat { json } => {
-            let stats = report::stats(&ledger)?;
+            let stats = report::stats(ledger)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
             } else {
@@ -243,7 +259,7 @@ fn execute(cli: Cli) -> Result<std::process::ExitCode> {
                 }
             }
         }
-        Action::Dashboard { .. } | Action::Run { .. } => unreachable!(),
+        _ => unreachable!("only report commands reach report_action"),
     }
-    Ok(std::process::ExitCode::SUCCESS)
+    Ok(())
 }

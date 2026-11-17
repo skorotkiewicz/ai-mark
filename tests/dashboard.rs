@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
+#[cfg(unix)]
+mod common;
 
 struct Dashboard {
     child: Child,
@@ -22,21 +24,26 @@ impl Drop for Dashboard {
 }
 impl Dashboard {
     fn start() -> Self {
+        Self::start_with(|_, _| {})
+    }
+
+    fn start_with(configure: impl FnOnce(&std::path::Path, &mut Command)) -> Self {
         let project = TempDir::new().unwrap();
         fs::write(
             project.path().join("hello & world.rs"),
             "human();\n<script>alert('source')</script>\n",
         )
         .unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_aimark"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aimark"));
+        command
             .current_dir(project.path())
             .arg("--root")
             .arg(project.path())
             .args(["dashboard", "--port", "0"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        configure(project.path(), &mut command);
+        let mut child = command.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
@@ -58,14 +65,16 @@ impl Dashboard {
         }
     }
     fn request(&self, method: &str, url: &str, extra: &str) -> String {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
+        Self::request_port(self.port, method, url, extra, Duration::from_secs(10))
+    }
+
+    fn request_port(port: u16, method: &str, url: &str, extra: &str, timeout: Duration) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(timeout)).unwrap();
         write!(
             stream,
             "{method} {url} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n{extra}\r\n",
-            self.port
+            port
         )
         .unwrap();
         let mut response = String::new();
@@ -118,4 +127,69 @@ fn dashboard_rejects_mutation_cross_origin_and_path_escapes() {
         assert!(d.request("GET", url, "").starts_with("HTTP/1.1 400"));
     }
     assert!(d.request("GET", "/missing", "").starts_with("HTTP/1.1 404"));
+}
+
+#[cfg(unix)]
+#[test]
+fn blocked_report_does_not_block_assets_or_edit_hooks() {
+    let gate = common::GitGate::new();
+    let dashboard = Dashboard::start_with(|root, command| {
+        let output = Command::new(env!("CARGO_BIN_EXE_aimark"))
+            .arg("--root")
+            .arg(root)
+            .arg("checkpoint")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        gate.configure(command);
+    });
+    let port = dashboard.port;
+    let report = std::thread::spawn(move || {
+        Dashboard::request_port(port, "GET", "/api/stat", "", Duration::from_secs(15))
+    });
+    gate.wait_until_blocked();
+    let asset = Dashboard::request_port(port, "GET", "/style.css", "", Duration::from_secs(2));
+    assert!(asset.starts_with("HTTP/1.1 200"));
+
+    let file = dashboard._project.path().join("hello & world.rs");
+    let call_hook = |event: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_aimark"))
+            .arg("--root")
+            .arg(dashboard._project.path())
+            .args(["hook", "claude"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = serde_json::json!({"hook_event_name":event,"tool_name":"Write","tool_input":{"file_path":file}});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{event}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    call_hook("PreToolUse");
+    fs::write(&file, "robot();\n").unwrap();
+    call_hook("PostToolUse");
+    gate.unblock();
+    let response = report.join().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let stats: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(stats["total"], 2);
+    assert_eq!(stats["ai"], 0);
+    let response = dashboard.request("GET", "/api/stat", "");
+    let stats: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(stats["ai"], 1);
 }
