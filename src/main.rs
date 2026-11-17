@@ -1,3 +1,4 @@
+mod codex;
 mod dashboard;
 mod hooks;
 mod ledger;
@@ -79,9 +80,9 @@ enum Action {
         #[arg(long, default_value_t = 4242)]
         port: u16,
     },
-    /// Handle scoped Claude PreToolUse/PostToolUse JSON from stdin
+    /// Handle scoped Claude or Codex hook JSON from stdin
     Hook {
-        #[arg(value_parser = ["claude"])]
+        #[arg(value_parser = ["claude", "codex"])]
         adapter: String,
     },
 }
@@ -101,7 +102,7 @@ fn main() -> std::process::ExitCode {
         Ok(code) => code,
         Err(error) => {
             eprintln!("aimark: {error:#}");
-            // Claude interprets exit 2 as blocking for PreToolUse. Other errors are non-blocking.
+            // Claude and Codex interpret exit 2 as blocking for supported PreToolUse hooks.
             std::process::ExitCode::from(if hook { 2 } else { 1 })
         }
     }
@@ -111,6 +112,10 @@ fn execute(cli: Cli) -> Result<std::process::ExitCode> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     let root = ledger::discover(cli.root.as_deref(), &cwd)?;
     let base = if cli.root.is_some() { &root } else { &cwd };
+    if matches!(&cli.command, Action::Hook { adapter } if adapter == "codex") {
+        codex::handle(root)?;
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
     if let Action::Run {
         attribution,
         command,

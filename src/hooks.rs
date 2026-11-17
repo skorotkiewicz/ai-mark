@@ -13,11 +13,15 @@ pub struct ClaudeHook {
     pub session: Option<String>,
 }
 
-pub fn read_claude() -> Result<ClaudeHook> {
+pub fn read_payload() -> Result<Value> {
     let mut input = String::new();
     io::stdin().take(4_194_305).read_to_string(&mut input)?;
     ensure!(input.len() <= 4_194_304, "hook payload exceeds 4 MiB");
-    let value: Value = serde_json::from_str(&input).context("hook stdin must be JSON")?;
+    serde_json::from_str(&input).context("hook stdin must be JSON")
+}
+
+pub fn read_claude() -> Result<ClaudeHook> {
+    let value = read_payload()?;
     let tool = value["tool_name"].as_str().unwrap_or("");
     ensure!(
         ["Edit", "Write", "MultiEdit", "NotebookEdit"].contains(&tool),

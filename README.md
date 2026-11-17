@@ -64,11 +64,39 @@ The root is the nearest ancestor containing `.aimark/` or `.git`, falling back t
 | `blame FILE [--json]` | Inspect current line attribution |
 | `stat [--json]` | Show AI percentage per file and overall |
 | `dashboard [--port PORT]` | Serve the local browser dashboard |
-| `hook claude` | Handle Claude file-tool hook JSON from stdin |
+| `hook claude` / `hook codex` | Handle native file-edit hook JSON from stdin |
 
 `run` starts the command in your current directory and preserves its exit code. It records changes even after failure. On Unix it forwards `SIGINT`, `SIGTERM`, and `SIGHUP` to the direct child and records partial edits before returning. Uncatchable termination, such as `SIGKILL`, cannot trigger a final snapshot. On Windows, normal command completion and failure are supported; interruption capture is Unix-only.
 
 ## Harness integrations
+
+### Codex
+
+Native integration is available for local Codex sessions with `PreToolUse` and `PostToolUse` hooks for `apply_patch`. The adapter follows the Codex 0.169 hook contract.
+
+1. Install the current aimark binary on `PATH`.
+2. Merge [integrations/codex/hooks.json](integrations/codex/hooks.json) into your project's `.codex/hooks.json`. Preserve existing hooks and use one configuration source per layer to avoid duplicate invocation.
+3. Start Codex and open `/hooks` to review and trust the added definitions. Local desktop sessions that load these hooks can use the app's hook review UI instead.
+
+Codex runs the hook command from the session working directory. Aimark discovers the project root and resolves patch paths relative to the `cwd` in the hook payload. For a project without Git, run `aimark init` at its intended root before launching Codex from a subdirectory.
+
+The adapter checkpoints the affected files before each patch and records them afterward with the model and session metadata. It supports additions, updates, deletions, and moves across multiple files. Unrelated pending human edits stay pending. Codex patches to different files can overlap; another patch to the same file is blocked until the earlier patch is recorded. Explicit remote-environment patches are rejected by this local adapter.
+
+Successful pre-edit checkpoints save a receipt under `.aimark/pending/`. A post event must match that receipt's session, turn, tool-call id, and file paths. Missing or mismatched receipts return an error and leave changes unrecorded. The receipt is claimed before recording and removed after success. Failed or interrupted recording keeps the file scope blocked, and replayed post events cannot reuse the old baseline. Inspect pending changes and use the manual `record --files` workflow to recover attribution after a failed record.
+
+If a tool never emits its post event, its receipt can remain and block later patches to those files. Confirm the original tool has stopped, inspect and record any surviving AI changes, then remove that tool's receipt from `.aimark/pending/` before retrying. Receipts include the session and tool-call ids so you can identify the affected call.
+
+Exit code 2 blocks supported Codex pre-tool calls. Codex can still proceed after a hook launch failure or external timeout; aimark's receipt check prevents the later post hook from guessing that a baseline exists. Hooks skipped because they are disabled or untrusted cannot record provenance.
+
+These hooks cover native `apply_patch` calls in local sessions. For shell writes, custom tools, or older local clients, use the wrapper:
+
+```sh
+aimark run --harness codex --model example-model -- codex
+```
+
+Choose native hooks or the wrapper for a session. The wrapper attributes the entire run's diff, including shell writes. Native hook coverage follows the [official Codex hooks reference](https://learn.chatgpt.com/docs/hooks).
+
+Hosted and cloud-orchestrated sessions do not use these local command hooks.
 
 ### Claude Code
 
