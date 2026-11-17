@@ -183,10 +183,17 @@ impl Ledger {
         let exclude = repo.join("info/exclude");
         fs::create_dir_all(repo.join("info"))?;
         append_excludes(&exclude, &[b".git", b".aimark"])?;
-        if gix::open_opts(&repo, gix::open::Options::isolated())?
-            .head_id()
-            .is_err()
-        {
+        let head = self
+            .git()
+            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+            .output()
+            .context("could not inspect ledger HEAD")?;
+        if !head.status.success() {
+            ensure!(
+                head.status.code() == Some(1),
+                "could not inspect ledger HEAD: {}",
+                String::from_utf8_lossy(&head.stderr).trim()
+            );
             output(self.git().args([
                 "commit",
                 "--quiet",
