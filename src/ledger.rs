@@ -125,6 +125,8 @@ impl Ledger {
 
     pub fn git(&self) -> Command {
         let mut cmd = clean_git();
+        // Keep filesystem paths canonical in Rust, but avoid Windows verbatim paths in Git arguments.
+        // Git paths below are relative to the explicit project working directory.
         cmd.current_dir(&self.root)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env(
@@ -133,9 +135,9 @@ impl Ledger {
             )
             .arg("--literal-pathspecs")
             .arg("--git-dir")
-            .arg(self.root.join(".aimark/repo"))
+            .arg(".aimark/repo")
             .arg("--work-tree")
-            .arg(&self.root)
+            .arg(".")
             .args([
                 "-c",
                 "commit.gpgsign=false",
@@ -144,11 +146,7 @@ impl Ledger {
                 "-c",
                 "core.autocrlf=false",
             ])
-            .arg("-c")
-            .arg(format!(
-                "core.hooksPath={}",
-                self.root.join(".aimark/no-hooks").display()
-            ))
+            .args(["-c", "core.hooksPath=.aimark/no-hooks"])
             .env("GIT_AUTHOR_NAME", "human")
             .env("GIT_AUTHOR_EMAIL", "human@aimark.local")
             .env("GIT_COMMITTER_NAME", "aimark")
@@ -171,7 +169,7 @@ impl Ledger {
                         "--quiet",
                         "--initial-branch=main",
                     ])
-                    .arg(&repo),
+                    .arg(".aimark/repo"),
             )?;
             output(self.git().args(["config", "core.bare", "false"]))?;
         }

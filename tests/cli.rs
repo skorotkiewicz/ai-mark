@@ -117,6 +117,46 @@ fn mixed_attribution_and_pending_reports_are_read_only() {
         before
     );
 }
+
+#[test]
+fn canonical_project_roots_work_from_an_unrelated_directory() {
+    let storage = TempDir::new().unwrap();
+    let caller = TempDir::new().unwrap();
+    let project = storage.path().join("project with spaces");
+    fs::create_dir(&project).unwrap();
+    // On Windows canonicalize produces the verbatim path prefix rejected by Git path arguments.
+    let root = project.canonicalize().unwrap();
+    let invoke = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_aimark"))
+            .current_dir(caller.path())
+            .arg("--root")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    write(&root, "a.txt", "human\n");
+    invoke(&["checkpoint"]);
+    write(&root, "a.txt", "robot\n");
+    invoke(&[
+        "record",
+        "--harness",
+        "test",
+        "--files",
+        root.join("a.txt").to_str().unwrap(),
+    ]);
+    let lines: Value = serde_json::from_str(&invoke(&["blame", "a.txt", "--json"])).unwrap();
+    assert_eq!(lines[0]["ai"], true);
+    assert_eq!(lines[0]["text"], "robot");
+    assert!(root.join(".aimark/repo/HEAD").exists());
+    assert!(!caller.path().join(".aimark").exists());
+}
 #[test]
 fn empty_projects_and_untracked_files() {
     let d = TempDir::new().unwrap();
@@ -513,6 +553,25 @@ fn ledger_does_not_run_inherited_commit_hooks() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(!r.join("hook-executed").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn shadow_commit_hooks_stay_disabled_with_relative_git_paths() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = TempDir::new().unwrap();
+    let root = d.path();
+    write(root, "a.txt", "human\n");
+    ok(root, &["checkpoint"]);
+    let hooks = root.join(".aimark/repo/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let pre_commit = hooks.join("pre-commit");
+    fs::write(&pre_commit, "#!/bin/sh\ntouch hook-executed\nexit 88\n").unwrap();
+    fs::set_permissions(&pre_commit, fs::Permissions::from_mode(0o755)).unwrap();
+    write(root, "a.txt", "changed human line\n");
+    ok(root, &["checkpoint"]);
+    assert!(!root.join("hook-executed").exists());
+    assert_eq!(blame(root, "a.txt")[0]["pending"], false);
 }
 
 #[test]
