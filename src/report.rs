@@ -1,4 +1,4 @@
-use crate::ledger::{AI_MAIL, Ledger, output};
+use crate::ledger::{AI_MAIL, Ledger};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{fs, io::Write, path::Path, process::Stdio};
@@ -58,8 +58,12 @@ pub fn blame(ledger: &Ledger, file: &str) -> Result<Vec<Line>> {
         "file is ignored or unavailable"
     );
     let contents = text(ledger, file)?;
-    let tree = output(ledger.git().args(["ls-tree", "-z", "HEAD", "--", file]))?;
-    if tree.stdout.is_empty() {
+    let repository = gix::open_opts(
+        ledger.root.join(".aimark/repo"),
+        gix::open::Options::isolated(),
+    )?;
+    let tree = repository.head_commit()?.tree()?;
+    if tree.lookup_entry_by_path(file)?.is_none() {
         return Ok(contents
             .lines()
             .enumerate()

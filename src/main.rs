@@ -93,8 +93,20 @@ fn paths(ledger: &Ledger, input: &[PathBuf], base: &Path) -> Result<Vec<String>>
     input.iter().map(|p| ledger.path(p, base)).collect()
 }
 
-fn main() -> Result<std::process::ExitCode> {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    let hook = matches!(&cli.command, Action::Hook { .. });
+    match execute(cli) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("aimark: {error:#}");
+            // Claude interprets exit 2 as blocking for PreToolUse. Other errors are non-blocking.
+            std::process::ExitCode::from(if hook { 2 } else { 1 })
+        }
+    }
+}
+
+fn execute(cli: Cli) -> Result<std::process::ExitCode> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     let root = ledger::discover(cli.root.as_deref(), &cwd)?;
     let base = if cli.root.is_some() { &root } else { &cwd };
@@ -108,6 +120,7 @@ fn main() -> Result<std::process::ExitCode> {
             &cwd,
             &attribution.harness,
             attribution.model.as_deref().unwrap_or("unknown"),
+            attribution.session.as_deref(),
             command,
         )?;
         return Ok(std::process::ExitCode::from(code.clamp(0, 255) as u8));

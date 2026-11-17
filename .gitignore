@@ -1,2 +1,5 @@
 resources
 target
+/.aimark/
+/node_modules/
+/test-results/

@@ -141,6 +141,7 @@ fn root_discovery_from_subdirectories() {
     assert_eq!(lines[0]["text"], "human");
     assert!(!r.join("src/.aimark").exists());
 }
+#[cfg(unix)]
 #[test]
 fn literal_selected_paths_and_unusual_filenames() {
     let d = TempDir::new().unwrap();
@@ -279,9 +280,9 @@ fn wrapper_preserves_failed_exit_and_caller_directory() {
     fs::create_dir(r.join("src")).unwrap();
     write(r, "src/a.txt", "human\n");
     ok(r, &["checkpoint"]);
-    let o = cli(
-        &r.join("src"),
-        &[
+    let o = Command::new(env!("CARGO_BIN_EXE_aimark"))
+        .current_dir(r.join("src"))
+        .args([
             "run",
             "--harness",
             "shell",
@@ -289,8 +290,9 @@ fn wrapper_preserves_failed_exit_and_caller_directory() {
             "sh",
             "-c",
             "printf 'robot\n' > a.txt; exit 7",
-        ],
-    );
+        ])
+        .output()
+        .unwrap();
     assert_eq!(o.status.code(), Some(7));
     assert_eq!(blame(r, "src/a.txt")[0]["ai"], true);
     assert!(!r.join("a.txt").exists());
@@ -311,4 +313,235 @@ fn escaping_symlinks_are_rejected() {
             .status
             .success()
     );
+}
+
+#[test]
+fn whitespace_formatting_rename_and_deletion_preserve_history() {
+    let d = TempDir::new().unwrap();
+    let r = d.path();
+    write(r, "a.rs", "fn main() {\n    human();\n}\n");
+    ok(r, &["checkpoint"]);
+    write(r, "a.rs", "fn main() {\n    human();\n    robot();\n}\n");
+    ok(r, &["record", "--harness", "test"]);
+    write(r, "a.rs", "fn main() {\n  human();\n  robot();\n}\n");
+    ok(r, &["checkpoint"]);
+    assert_eq!(blame(r, "a.rs")[2]["ai"], true);
+    fs::rename(r.join("a.rs"), r.join("renamed.rs")).unwrap();
+    ok(r, &["checkpoint"]);
+    assert_eq!(blame(r, "renamed.rs")[2]["ai"], true);
+    fs::remove_file(r.join("renamed.rs")).unwrap();
+    ok(r, &["record", "--harness", "test", "--files", "renamed.rs"]);
+    let s: Value = serde_json::from_str(&ok(r, &["stat", "--json"])).unwrap();
+    assert_eq!(s["total"], 0);
+}
+
+#[test]
+fn concurrent_first_use_is_serialized() {
+    let d = TempDir::new().unwrap();
+    let r = d.path();
+    write(r, "a.txt", "human\n");
+    let mut children = Vec::new();
+    for _ in 0..6 {
+        children.push(
+            Command::new(env!("CARGO_BIN_EXE_aimark"))
+                .arg("--root")
+                .arg(r)
+                .arg("checkpoint")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+    }
+    for child in children {
+        let o = child.wait_with_output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+    assert_eq!(blame(r, "a.txt")[0]["pending"], false);
+}
+
+#[test]
+fn inherited_git_environment_cannot_redirect_ledger_operations() {
+    let d = TempDir::new().unwrap();
+    let other = TempDir::new().unwrap();
+    let r = d.path();
+    write(r, "a.txt", "human\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_aimark"))
+        .arg("--root")
+        .arg(r)
+        .arg("checkpoint")
+        .env("GIT_DIR", other.path())
+        .env("GIT_WORK_TREE", other.path())
+        .env("GIT_INDEX_FILE", other.path().join("index"))
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.bare")
+        .env("GIT_CONFIG_VALUE_0", "true")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!other.path().join("index").exists());
+    assert_eq!(blame(r, "a.txt")[0]["pending"], false);
+}
+
+#[cfg(unix)]
+#[test]
+fn wrapper_records_partial_edits_on_sigterm_and_keeps_session() {
+    use std::time::{Duration, Instant};
+    let d = TempDir::new().unwrap();
+    let r = d.path();
+    write(r, "a.txt", "human\n");
+    ok(r, &["checkpoint"]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aimark"))
+        .arg("--root")
+        .arg(r)
+        .args([
+            "run",
+            "--harness",
+            "shell",
+            "--session",
+            "session-1",
+            "--",
+            "sh",
+            "-c",
+            "printf 'robot\\n' > a.txt; touch ready; exec sleep 20",
+        ])
+        .current_dir(r)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while !r.join("ready").exists() {
+        assert!(start.elapsed() < Duration::from_secs(8));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // SAFETY: child is still running; SIGTERM is a valid signal.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("wrapper did not forward SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(143));
+    assert_eq!(blame(r, "a.txt")[0]["ai"], true);
+    assert!(
+        git(r, &["--git-dir=.aimark/repo", "log", "-1", "--format=%B"])
+            .contains("AI-Session: session-1")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ledger_does_not_run_inherited_commit_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = TempDir::new().unwrap();
+    let r = d.path();
+    let hooks = r.join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    let hook = hooks.join("post-commit");
+    fs::write(&hook, "#!/bin/sh\ntouch hook-executed\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    write(r, "a.txt", "human\n");
+    let o = Command::new(env!("CARGO_BIN_EXE_aimark"))
+        .arg("--root")
+        .arg(r)
+        .arg("checkpoint")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", &hooks)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(!r.join("hook-executed").exists());
+}
+
+#[test]
+fn claude_checkpoint_failure_returns_blocking_exit_status() {
+    let d = TempDir::new().unwrap();
+    let r = d.path();
+    write(r, "a.txt", "human\n");
+    ok(r, &["checkpoint"]);
+    fs::write(
+        r.join(".aimark/repo/index.lock"),
+        "held by another Git operation",
+    )
+    .unwrap();
+    let output = hook(r, "PreToolUse", Some(&r.join("a.txt")));
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unscoped_record_handles_directory_replaced_by_symlink() {
+    use std::os::unix::fs::symlink;
+    let d = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let r = d.path();
+    fs::create_dir(r.join("dir")).unwrap();
+    write(r, "dir/a.txt", "human\n");
+    write(outside.path(), "external.txt", "private\n");
+    ok(r, &["checkpoint"]);
+    fs::remove_file(r.join("dir/a.txt")).unwrap();
+    fs::remove_dir(r.join("dir")).unwrap();
+    symlink(outside.path(), r.join("dir")).unwrap();
+    ok(r, &["record", "--harness", "test"]);
+    let tree = git(r, &["--git-dir=.aimark/repo", "ls-tree", "-r", "HEAD"]);
+    assert!(tree.contains("120000 blob"));
+    assert!(!tree.contains("dir/a.txt"));
+    let s: Value = serde_json::from_str(&ok(r, &["stat", "--json"])).unwrap();
+    assert_eq!(s["total"], 0);
+    assert_eq!(s["skipped"], 1);
+}
+
+#[test]
+fn preserves_non_utf8_real_git_exclude_rules() {
+    let d = TempDir::new().unwrap();
+    let r = d.path();
+    git(r, &["init", "-q"]);
+    let original = b"# comment: \xff\nlocal-private.txt\n";
+    fs::write(r.join(".git/info/exclude"), original).unwrap();
+    ok(r, &["init"]);
+    let updated = fs::read(r.join(".git/info/exclude")).unwrap();
+    assert!(updated.starts_with(original));
+    write(r, "local-private.txt", "private\n");
+    assert!(!git(r, &["status", "--porcelain"]).contains("local-private.txt"));
+}
+
+#[cfg(windows)]
+#[test]
+fn mixed_case_git_environment_cannot_redirect_windows_index() {
+    let d = TempDir::new().unwrap();
+    let other = TempDir::new().unwrap();
+    let r = d.path();
+    write(r, "a.txt", "human\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_aimark"))
+        .arg("--root")
+        .arg(r)
+        .arg("checkpoint")
+        .env_remove("GIT_INDEX_FILE")
+        .env("git_index_file", other.path().join("index"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!other.path().join("index").exists());
 }

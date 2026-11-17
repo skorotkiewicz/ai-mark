@@ -1,20 +1,28 @@
 set shell := ["bash", "-cu"]
 
 build:
-    cargo build --release
+    cargo build --locked --release
+
+build-dev:
+    cargo build --locked
 
 install:
-    cargo install --path .
+    cargo install --path . --locked
 
-demo: install
-    #!/usr/bin/env bash
-    set -euo pipefail
-    d=$(mktemp -d)
-    cd "$d"
-    git init -q
-    printf 'fn main() {\n    println!("written by a human");\n}\n' > main.rs
-    aimark checkpoint
-    printf 'fn main() {\n    println!("written by a human");\n    println!("written by an LLM");\n}\n' > main.rs
-    aimark record --harness demo --model big-model --files main.rs
-    aimark blame main.rs
-    aimark stat
+check:
+    cargo fmt --all --check
+    cargo clippy --locked --all-targets -- -D warnings
+
+test:
+    cargo test --locked
+
+check-ui:
+    npm run check
+    npm run test:pi
+    npm run test:browser
+
+demo: build-dev
+    bash scripts/demo.sh "{{justfile_directory()}}/target/debug/aimark"
+
+demo-dashboard: build-dev
+    bash scripts/demo.sh "{{justfile_directory()}}/target/debug/aimark" dashboard

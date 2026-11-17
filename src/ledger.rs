@@ -12,7 +12,11 @@ pub const AI_MAIL: &str = "ai@aimark.local";
 pub fn clean_git() -> Command {
     let mut cmd = Command::new("git");
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
+        if key
+            .as_encoded_bytes()
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"GIT_"))
+        {
             cmd.env_remove(key);
         }
     }
@@ -56,8 +60,40 @@ fn ordinary_directory(path: &Path) -> Result<()> {
             "{} must be an ordinary directory",
             path.display()
         ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::create_dir(path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match fs::create_dir(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => ordinary_directory(path)?,
+            Err(e) => return Err(e.into()),
+        },
         Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+fn append_excludes(path: &Path, rules: &[&[u8]]) -> Result<()> {
+    use std::io::Write;
+    let existing = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+    };
+    let mut addition = Vec::new();
+    for rule in rules {
+        if !existing
+            .split(|b| *b == b'\n')
+            .any(|line| line.strip_suffix(b"\r").unwrap_or(line) == *rule)
+        {
+            addition.push(b'\n');
+            addition.extend_from_slice(rule);
+            addition.push(b'\n');
+        }
+    }
+    if !addition.is_empty() {
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)?
+            .write_all(&addition)?;
     }
     Ok(())
 }
@@ -143,22 +179,13 @@ impl Ledger {
             !fs::symlink_metadata(&repo)?.file_type().is_symlink(),
             "ledger repository must not be a symlink"
         );
-        // Exclude metadata even if a worktree .gitignore explicitly includes it.
+        // Candidate filtering also excludes metadata if a worktree ignore file negates these rules.
         let exclude = repo.join("info/exclude");
         fs::create_dir_all(repo.join("info"))?;
-        let mut text = fs::read_to_string(&exclude).unwrap_or_default();
-        for rule in [".git", ".aimark"] {
-            if !text.lines().any(|line| line == rule) {
-                text.push_str(&format!("\n{rule}\n"));
-            }
-        }
-        fs::write(exclude, text)?;
-        if !self
-            .git()
-            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-            .output()?
-            .status
-            .success()
+        append_excludes(&exclude, &[b".git", b".aimark"])?;
+        if gix::open_opts(&repo, gix::open::Options::isolated())?
+            .head_id()
+            .is_err()
         {
             output(self.git().args([
                 "commit",
@@ -180,11 +207,7 @@ impl Ledger {
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                let mut current = fs::read_to_string(&path).unwrap_or_default();
-                if !current.lines().any(|l| l == "/.aimark/") {
-                    current.push_str("\n/.aimark/\n");
-                    fs::write(path, current)?;
-                }
+                append_excludes(&path, &[b"/.aimark/"])?;
             }
         }
         Ok(())
@@ -296,31 +319,48 @@ impl Ledger {
     fn commit(&self, author: &str, email: &str, message: &str, paths: &[String]) -> Result<bool> {
         // Recover the index after an earlier failed snapshot without changing source files.
         output(self.git().args(["reset", "--mixed", "--quiet", "HEAD"]))?;
-        let files = self.files(paths)?;
-        // Use stdin to avoid OS command-length limits, and NUL separators for arbitrary names.
-        if files.is_empty() {
-            return Ok(false);
+        let mut files = self.files(paths)?;
+        let mut removed = Vec::new();
+        files.retain(|file| {
+            let mut ancestor = self.root.join(file);
+            while ancestor.pop() && ancestor != self.root {
+                if fs::symlink_metadata(&ancestor).is_ok_and(|m| !m.is_dir()) {
+                    removed.push(file.clone());
+                    return false;
+                }
+            }
+            true
+        });
+        // Cached descendants become deletions when their directory is now a file or symlink.
+        // Stage removals separately so ignored replacement files stay ignored.
+        for file in removed {
+            output(
+                self.git()
+                    .args(["update-index", "--force-remove", "--", &file]),
+            )?;
         }
-        use std::io::Write;
-        use std::process::Stdio;
-        let mut cmd = self.git();
-        cmd.args(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd.spawn()?;
-        let mut input = child.stdin.take().context("Git stdin unavailable")?;
-        for file in files {
-            input.write_all(file.as_bytes())?;
-            input.write_all(&[0])?;
+        if !files.is_empty() {
+            use std::io::Write;
+            use std::process::Stdio;
+            let mut cmd = self.git();
+            cmd.args(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = cmd.spawn()?;
+            let mut input = child.stdin.take().context("Git stdin unavailable")?;
+            for file in files {
+                input.write_all(file.as_bytes())?;
+                input.write_all(&[0])?;
+            }
+            drop(input);
+            let result = child.wait_with_output()?;
+            ensure!(
+                result.status.success(),
+                "Git add failed: {}",
+                String::from_utf8_lossy(&result.stderr).trim()
+            );
         }
-        drop(input);
-        let result = child.wait_with_output()?;
-        ensure!(
-            result.status.success(),
-            "Git add failed: {}",
-            String::from_utf8_lossy(&result.stderr).trim()
-        );
         let status = self
             .git()
             .args(["diff", "--cached", "--quiet", "--exit-code"])

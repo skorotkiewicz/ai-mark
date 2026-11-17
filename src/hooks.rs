@@ -46,13 +46,12 @@ fn transcript_model(path: &Path) -> Option<String> {
     let file = File::open(path).ok()?;
     let mut model = None;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if let Ok(value) = serde_json::from_str::<Value>(&line) {
-            if let Some(name) = value["message"]["model"]
+        if let Ok(value) = serde_json::from_str::<Value>(&line)
+            && let Some(name) = value["message"]["model"]
                 .as_str()
                 .filter(|m| !m.starts_with('<'))
-            {
-                model = Some(name.into());
-            }
+        {
+            model = Some(name.into());
         }
     }
     model
