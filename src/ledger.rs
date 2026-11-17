@@ -220,7 +220,7 @@ impl Ledger {
         Ok(())
     }
 
-    /// Resolve existing and deleted paths without following symlinks or accepting Git magic.
+    /// Resolve project-root aliases while rejecting symlinks inside the project and Git magic.
     pub fn path(&self, input: &Path, base: &Path) -> Result<String> {
         let absolute = if input.is_absolute() {
             input.to_owned()
@@ -237,9 +237,22 @@ impl Ledger {
                 other => normalized.push(other.as_os_str()),
             }
         }
-        let relative = normalized
-            .strip_prefix(&self.root)
-            .context("path is outside the project")?;
+        let relative = match normalized.strip_prefix(&self.root) {
+            Ok(relative) => relative.to_owned(),
+            Err(_) => {
+                // macOS temporary paths can reach the same root through an aliased ancestor.
+                // Choose the outermost root alias so in-project symlinks remain in the suffix
+                // and are rejected below. The suffix may name a new or deleted file.
+                let root_alias = normalized
+                    .ancestors()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .find(|ancestor| ancestor.canonicalize().is_ok_and(|path| path == self.root))
+                    .context("path is outside the project")?;
+                normalized.strip_prefix(root_alias)?.to_owned()
+            }
+        };
         ensure!(
             !relative.as_os_str().is_empty(),
             "select a file or subdirectory, not the project root"

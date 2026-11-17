@@ -65,6 +65,15 @@ fn hook(root: &Path, event: &str, file: Option<&Path>) -> Output {
     p.wait_with_output().unwrap()
 }
 
+fn ok_hook(root: &Path, event: &str, file: &Path) {
+    let output = hook(root, event, Some(file));
+    assert!(
+        output.status.success(),
+        "{event}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn mixed_attribution_and_pending_reports_are_read_only() {
     let d = TempDir::new().unwrap();
@@ -222,31 +231,71 @@ fn scoped_hooks_preserve_overlapping_edits() {
     write(r, "a.txt", "human a\n");
     write(r, "b.txt", "human b\n");
     ok(r, &["checkpoint"]);
-    assert!(
-        hook(r, "PreToolUse", Some(&r.join("a.txt")))
-            .status
-            .success()
-    );
+    ok_hook(r, "PreToolUse", &r.join("a.txt"));
     write(r, "a.txt", "robot a\n");
-    assert!(
-        hook(r, "PreToolUse", Some(&r.join("b.txt")))
-            .status
-            .success()
-    );
+    ok_hook(r, "PreToolUse", &r.join("b.txt"));
     write(r, "b.txt", "robot b\n");
-    assert!(
-        hook(r, "PostToolUse", Some(&r.join("a.txt")))
-            .status
-            .success()
-    );
-    assert!(
-        hook(r, "PostToolUse", Some(&r.join("b.txt")))
-            .status
-            .success()
-    );
+    ok_hook(r, "PostToolUse", &r.join("a.txt"));
+    ok_hook(r, "PostToolUse", &r.join("b.txt"));
     assert_eq!(blame(r, "a.txt")[0]["ai"], true);
     assert_eq!(blame(r, "b.txt")[0]["ai"], true);
 }
+#[cfg(unix)]
+#[test]
+fn hook_paths_accept_symlinked_project_ancestors() {
+    use std::os::unix::fs::symlink;
+    let storage = TempDir::new().unwrap();
+    let aliases = TempDir::new().unwrap();
+    let root = storage.path().join("project");
+    fs::create_dir(&root).unwrap();
+    symlink(storage.path(), aliases.path().join("storage")).unwrap();
+    let alias = aliases.path().join("storage/project");
+    write(&root, "existing.txt", "human\n");
+    ok(&root, &["checkpoint"]);
+
+    ok_hook(&root, "PreToolUse", &alias.join("existing.txt"));
+    write(&root, "existing.txt", "robot\n");
+    ok_hook(&root, "PostToolUse", &alias.join("existing.txt"));
+    assert_eq!(blame(&root, "existing.txt")[0]["ai"], true);
+    assert_eq!(
+        blame(&root, alias.join("existing.txt").to_str().unwrap())[0]["ai"],
+        true
+    );
+
+    ok_hook(&root, "PreToolUse", &alias.join("new.txt"));
+    write(&root, "new.txt", "new robot line\n");
+    ok_hook(&root, "PostToolUse", &alias.join("new.txt"));
+    assert_eq!(blame(&root, "new.txt")[0]["ai"], true);
+
+    ok_hook(&root, "PreToolUse", &alias.join("existing.txt"));
+    fs::remove_file(root.join("existing.txt")).unwrap();
+    ok_hook(&root, "PostToolUse", &alias.join("existing.txt"));
+    let stats: Value = serde_json::from_str(&ok(&root, &["stat", "--json"])).unwrap();
+    assert_eq!(stats["ai"], 1);
+    assert_eq!(stats["total"], 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn aliased_project_ancestors_do_not_allow_symlinks_inside_project() {
+    use std::os::unix::fs::symlink;
+    let storage = TempDir::new().unwrap();
+    let aliases = TempDir::new().unwrap();
+    let root = storage.path().join("project");
+    fs::create_dir(&root).unwrap();
+    symlink(storage.path(), aliases.path().join("storage")).unwrap();
+    symlink(&root, root.join("self")).unwrap();
+    write(&root, "a.txt", "human\n");
+    ok(&root, &["checkpoint"]);
+    let output = hook(
+        &root,
+        "PreToolUse",
+        Some(&aliases.path().join("storage/project/self/a.txt")),
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("symlink paths cannot be selected"));
+}
+
 #[test]
 fn malformed_hooks_never_attribute_whole_project() {
     let d = TempDir::new().unwrap();
