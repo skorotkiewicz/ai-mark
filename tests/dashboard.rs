@@ -41,8 +41,11 @@ impl Dashboard {
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
             let mut line = String::new();
-            let result = BufReader::new(stdout).read_line(&mut line);
+            let mut reader = BufReader::new(stdout);
+            let result = reader.read_line(&mut line);
             let _ = send.send((result, line));
+            // Keep draining output; closing the pipe here races the server's next println.
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
         });
         let (_, line) = receive
             .recv_timeout(Duration::from_secs(15))
