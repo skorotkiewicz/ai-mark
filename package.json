@@ -5,6 +5,7 @@
   "scripts": {
     "check": "node --check web/app.js",
     "test:pi": "node --test tests/pi.test.mjs",
+    "test:codex": "node --test tests/codex-plugin.test.mjs",
     "test:browser": "node tests/browser.mjs"
   },
   "devDependencies": {

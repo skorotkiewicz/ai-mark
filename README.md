@@ -70,6 +70,19 @@ The root is the nearest ancestor containing `.aimark/` or `.git`, falling back t
 
 ## Harness integrations
 
+### Codex
+
+Install aimark and Node.js on `PATH`. From this checkout, add the local marketplace and install the plugin.
+
+```sh
+codex plugin marketplace add ./integrations
+codex plugin add aimark@aimark-local
+```
+
+Open `/hooks` in Codex to review and trust the hooks. The [plugin manifest](integrations/codex-plugin/plugin.json) loads the bundled JavaScript handler before and after native `apply_patch` calls. It checkpoints only the affected files and records them with the Codex model and session.
+
+For shell-based edits, use `aimark run --harness codex -- codex` with the plugin hooks disabled for that session. If an interrupted patch leaves a reservation under `.aimark/codex-pending/`, confirm that the tool has stopped, review and record any surviving edits, then remove that call's reservation before retrying.
+
 ### Claude Code
 
 Install aimark on `PATH`, then merge [integrations/claude/settings.json](integrations/claude/settings.json) into your project's `.claude/settings.json`. Preserve any hooks already configured there. The configuration requires Claude Code 2.1.295 or newer for `onFailure: "block"`. The supplied commands use the POSIX shell syntax supported by Claude Code on macOS, Linux, and Git Bash.

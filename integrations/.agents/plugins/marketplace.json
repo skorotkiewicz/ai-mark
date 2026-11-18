@@ -1,0 +1,12 @@
+{
+  "name": "aimark-local",
+  "interface": { "displayName": "aimark" },
+  "plugins": [
+    {
+      "name": "aimark",
+      "source": { "source": "local", "path": "./codex-plugin" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}
