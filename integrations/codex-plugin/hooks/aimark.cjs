@@ -68,6 +68,35 @@ function patchTargets(command) {
   return targets;
 }
 
+function shellTargets(command) {
+  // Accept one simple echo/printf command with one literal output redirect.
+  // A quoted '>' is data. Pipelines, expansions and compound commands can
+  // change the destination, so leave them outside this integration.
+  if (typeof command !== "string" || /[\r\n\0]/u.test(command)) return [];
+  const start = /^[ \t]*(?:echo|printf)(?=[ \t>])/u.exec(command);
+  if (!start) return [];
+
+  const token = /[ \t]+|>>?|[a-zA-Z0-9_./,:+%=-]+|'[^']*'|"(?:[^"\\$\x60!]|\\.)*"/gy;
+  token.lastIndex = start[0].length;
+  let redirected = false;
+  let target;
+  while (token.lastIndex < command.length) {
+    const match = token.exec(command);
+    if (!match) return [];
+    const word = match[0];
+    if (/^[ \t]/u.test(word)) continue;
+    if (target !== undefined) return [];
+    if (word === ">" || word === ">>") {
+      if (redirected) return [];
+      redirected = true;
+    } else if (redirected) {
+      if (word.startsWith('"') && word.includes("\\")) return [];
+      target = /^['"]/u.test(word) ? word.slice(1, -1) : word;
+    }
+  }
+  return target ? [target] : [];
+}
+
 function existing(pathname) {
   try {
     return fs.lstatSync(pathname);
@@ -199,8 +228,12 @@ async function record(root, reservation, files) {
 
 async function main() {
   const event = await readEvent();
-  check(event?.tool_name === "apply_patch", "expected an apply_patch hook");
+  const shell = event?.tool_name === "Bash";
+  check(shell || event?.tool_name === "apply_patch", "unsupported Codex tool");
   check(["PreToolUse", "PostToolUse"].includes(event.hook_event_name), "unsupported Codex hook event");
+  const command = event.tool_input?.command;
+  const targets = shell ? shellTargets(command) : patchTargets(command);
+  if (!targets.length) return;
   const session = metadata(event.session_id, "session_id");
   const turn = metadata(event.turn_id, "turn_id");
   const call = metadata(event.tool_use_id, "tool_use_id");
@@ -209,7 +242,8 @@ async function main() {
   const cwd = fs.realpathSync(event.cwd);
   check(fs.statSync(cwd).isDirectory(), "hook cwd must be a directory");
   const root = projectRoot(cwd);
-  const files = [...new Set(patchTargets(event.tool_input?.command)
+  if (shell && !contained(root, path.resolve(cwd, targets[0]))) return;
+  const files = [...new Set(targets
     .map((target) => projectFile(root, cwd, target)))].sort();
   const ledger = path.join(root, ".aimark");
   const pending = path.join(ledger, "codex-pending");
