@@ -1,0 +1,13 @@
+{
+  "name": "aimark",
+  "version": "0.1.0",
+  "description": "Track line-level attribution for Codex edits in the local aimark ledger.",
+  "license": "MIT",
+  "hooks": "./codex-hooks.json",
+  "interface": {
+    "displayName": "aimark",
+    "shortDescription": "Track Codex edits locally",
+    "category": "Developer Tools",
+    "capabilities": ["Lifecycle hooks"]
+  }
+}
